@@ -1,5 +1,5 @@
 local MOD_NAME = "Ultrawide UI Overhaul"
-local VERSION = "2.2.1"
+local VERSION = "2.2.2"
 local LOG_PREFIX = "[UltrawideUIOverhaul]"
 local DEBUG = false
 
@@ -309,6 +309,20 @@ local function getGalleryScreenshotsPerPage()
             geometry.aspect / VANILLA_ASPECT - 0.000001
         )
     )
+end
+
+-- FrameSwitcherMenuGameController (the SmartFrame picture picker) derives
+-- from GalleryMenuGameController. CET therefore delivers the parent-class
+-- OnInitialize observers for both screens. Only the full Gallery may use the
+-- ultrawide page size: the SmartFrame picker has a fixed nine-slot layout and
+-- must retain the page size authored for that controller.
+local function isMainGalleryController(controller)
+    if controller == nil then return false end
+
+    local className = safe(function()
+        return controller:GetClassName().value
+    end)
+    return className == "GalleryMenuGameController"
 end
 
 -- The original layouts were visually tuned at 16:9 and 21:9. Keep the exact
@@ -3625,6 +3639,8 @@ registerForEvent("onInit", function()
     end)
 
     ObserveBefore("GalleryMenuGameController", "OnInitialize", function(controller)
+        if not isMainGalleryController(controller) then return end
+
         local screenshotsPerPage = getGalleryScreenshotsPerPage()
         local ok, errorMessage = pcall(function()
             controller.screenshotsPerPage = screenshotsPerPage
@@ -3636,6 +3652,8 @@ registerForEvent("onInit", function()
     end)
 
     Observe("GalleryMenuGameController", "OnInitialize", function(controller)
+        if not isMainGalleryController(controller) then return end
+
         applyGalleryLayout(controller, "OnInitialize")
         table.insert(pendingLayouts, {
             controller = controller,

@@ -1,4 +1,4 @@
--- Ultrawide UI Overhaul v2.2.1
+-- Ultrawide UI Overhaul v2.2.2
 -- Black Pillars Coordinator
 --
 -- The native plugin owns the compositor hook. This small, independent CET
