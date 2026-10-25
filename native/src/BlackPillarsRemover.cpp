@@ -21,6 +21,7 @@ const RED4ext::v1::Sdk* s_sdk = nullptr;
 using FitReferenceRect_t = RED4ext::Vector2* (*)(RED4ext::Vector2*, const RED4ext::Vector2*);
 FitReferenceRect_t s_originalFitReferenceRect = nullptr;
 void* s_fitReferenceRectTarget = nullptr;
+uintptr_t s_controllerPointerCallerReturn = 0;
 std::atomic_bool s_suppressed{false};
 std::atomic_uintptr_t s_gameWindow{};
 std::atomic_uint64_t s_lastWindowSearchMs{};
@@ -200,18 +201,15 @@ RED4ext::Vector2* FitReferenceRectOverride(RED4ext::Vector2* aResult,
 {
     auto* result = s_originalFitReferenceRect(aResult, aInput);
 
-    const auto imageBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    const auto returnAddress = reinterpret_cast<uintptr_t>(_ReturnAddress());
-    const auto callerRva = imageBase != 0 ? returnAddress - imageBase : 0;
-
     // This caller converts analog-controller pointer coordinates into the
     // stock UI reference space. Returning the physical ultrawide rectangle
     // here makes the virtual pointer appear but prevents stick movement.
     // Keep the stock fitted rectangle for this input path while allowing the
     // fullscreen compositor callers below to use the physical rectangle.
-    constexpr uintptr_t kControllerPointerCallerReturnRva = 0x103BE12;
     const bool isControllerPointerPath =
-        callerRva == kControllerPointerCallerReturnRva;
+        s_controllerPointerCallerReturn != 0 &&
+        reinterpret_cast<uintptr_t>(_ReturnAddress()) ==
+            s_controllerPointerCallerReturn;
 
     // REDengine normally fits fullscreen menus into a fixed 3840x2160
     // reference rectangle. Preserve the physical rectangle on ultrawide
@@ -252,26 +250,103 @@ void SetBlackBarsSuppressed(RED4ext::IScriptable* aContext,
                        : "[BlackPillarsRemover] pillars enabled");
 }
 
+// -1 in a pattern is a wildcard byte (RIP-relative displacements change with
+// every game build).
+uint8_t* FindUniquePattern(const int16_t* aPattern, size_t aLength)
+{
+    auto* imageBase = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    if (imageBase == nullptr)
+        return nullptr;
+
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(imageBase);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+        imageBase + dos->e_lfanew);
+    const auto* section = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section)
+    {
+        if (std::memcmp(section->Name, ".text", 6) != 0)
+            continue;
+
+        uint8_t* begin = imageBase + section->VirtualAddress;
+        const size_t size = section->Misc.VirtualSize;
+        uint8_t* found = nullptr;
+        for (size_t offset = 0; offset + aLength <= size; ++offset)
+        {
+            size_t j = 0;
+            while (j < aLength &&
+                   (aPattern[j] < 0 ||
+                    begin[offset + j] == static_cast<uint8_t>(aPattern[j])))
+                ++j;
+            if (j != aLength)
+                continue;
+            // Refuse ambiguous matches instead of hooking the wrong code.
+            if (found != nullptr)
+                return nullptr;
+            found = begin + offset;
+        }
+        return found;
+    }
+    return nullptr;
+}
+
+uint8_t* ResolveCallTarget(uint8_t* aCall)
+{
+    int32_t displacement = 0;
+    std::memcpy(&displacement, aCall + 1, sizeof(displacement));
+    return aCall + 5 + displacement;
+}
+
+void FindControllerPointerCaller(uint8_t* aTarget)
+{
+    // Small wrapper used by the analog-stick virtual pointer: it copies the
+    // input vector to the stack and calls FitReferenceRect (2.31 / 2.5).
+    constexpr int16_t kCallerPattern[] = {
+        0x48, 0x8B, 0xC4, 0x48, 0x83, 0xEC, 0x28, 0xF3, 0x0F, 0x10, 0x02,
+        0x4C, 0x8B, 0xC1, 0xF3, 0x0F, 0x10, 0x4A, 0x04, 0x48, 0x8D, 0x48,
+        0x10, 0x48, 0x8D, 0x50, 0x08, 0xF3, 0x0F, 0x11, 0x40, 0x08, 0xF3,
+        0x0F, 0x11, 0x48, 0x0C, 0xE8
+    };
+    constexpr size_t kCallOffset = sizeof(kCallerPattern) / sizeof(int16_t) - 1;
+
+    auto* caller = FindUniquePattern(
+        kCallerPattern, sizeof(kCallerPattern) / sizeof(int16_t));
+    if (caller == nullptr || ResolveCallTarget(caller + kCallOffset) != aTarget)
+    {
+        LogInfo("[BlackPillarsRemover] controller pointer caller not found; "
+                "stick pointer may not move while pillars are disabled");
+        return;
+    }
+    s_controllerPointerCallerReturn =
+        reinterpret_cast<uintptr_t>(caller + kCallOffset + 5);
+}
+
 bool InstallHook()
 {
     if (s_sdk == nullptr || s_sdk->hooking == nullptr)
         return false;
 
-    // Cyberpunk 2077 2.31. Refuse to attach if a game update changes the
-    // function, instead of hooking an unknown address.
-    constexpr uintptr_t kFitReferenceRectRva = 0x2980F4;
-    constexpr uint8_t kExpected[] = {
-        0xF3, 0x0F, 0x10, 0x42, 0x04, 0xF3, 0x0F, 0x10, 0x0A,
-        0x0F, 0x28, 0xD0
+    // Located by signature rather than a fixed RVA so game patches that only
+    // move the function (2.31 -> 2.5) keep working. Refuse to attach if the
+    // function body itself changed.
+    constexpr int16_t kFitReferenceRectPattern[] = {
+        0xF3, 0x0F, 0x10, 0x42, 0x04,             // movss xmm0, [rdx+4]
+        0xF3, 0x0F, 0x10, 0x0A,                   // movss xmm1, [rdx]
+        0x0F, 0x28, 0xD0,                         // movaps xmm2, xmm0
+        0xF3, 0x0F, 0x59, 0x15, -1, -1, -1, -1,   // mulss xmm2, [rip+x]
+        0x0F, 0x28, 0xD9,                         // movaps xmm3, xmm1
+        0xF3, 0x0F, 0x59, 0x1D                    // mulss xmm3, [rip+x]
     };
 
-    auto* imageBase = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    auto* target = imageBase != nullptr ? imageBase + kFitReferenceRectRva : nullptr;
-    if (target == nullptr || std::memcmp(target, kExpected, sizeof(kExpected)) != 0)
+    auto* target = FindUniquePattern(
+        kFitReferenceRectPattern,
+        sizeof(kFitReferenceRectPattern) / sizeof(int16_t));
+    if (target == nullptr)
     {
         LogInfo("[BlackPillarsRemover] unsupported game executable; hook not installed");
         return false;
     }
+
+    FindControllerPointerCaller(target);
 
     if (!s_sdk->hooking->Attach(s_pluginHandle, target,
                                 reinterpret_cast<void*>(&FitReferenceRectOverride),
@@ -338,8 +413,10 @@ RED4EXT_C_EXPORT void RED4EXT_CALL Query(RED4ext::v1::PluginInfo* aInfo)
 {
     aInfo->name = L"Black Pillars Remover";
     aInfo->author = L"djoole";
-    aInfo->version = RED4EXT_V1_SEMVER(2, 0, 0);
-    aInfo->runtime = RED4EXT_V1_RUNTIME_VERSION_LATEST;
+    aInfo->version = RED4EXT_V1_SEMVER(2, 5, 6);
+    // The hook validates the executable itself by signature, so do not let
+    // RED4ext reject the plugin on every game patch.
+    aInfo->runtime = RED4EXT_V1_RUNTIME_VERSION_INDEPENDENT;
     aInfo->sdk = RED4EXT_V1_SDK_VERSION_CURRENT;
 }
 
