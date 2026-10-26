@@ -1,6 +1,14 @@
 # Ultrawide UI Overhaul
 
-Current release: **2.2.2**
+Current release: **2.5.6** (unofficial fix for Cyberpunk 2077 2.5)
+
+> **Unofficial fix.** Version 2.5.6 is a community fix of djoole's original
+> mod. All credit for the mod goes to the original author.
+>
+> **Disclaimer:** This fix was written with the help of Claude AI. I accept no
+> liability for the code or any damage it may cause. Use at your own risk and
+> back up your saves. Prebuilt binaries are provided, but reviewing the source
+> or compiling it yourself is recommended.
 
 RED4ext plugin (`BlackPillarsRemover`) that prevents Cyberpunk 2077's fullscreen compositor from
 adding 16:9 side pillars when an ultrawide menu or background is intentionally
@@ -34,9 +42,20 @@ Widget placement is handled separately by the CET script in
 
 ## Compatibility
 
-The hook is version-locked to Cyberpunk 2077 2.31. It checks the expected bytes
-at the target RVA and refuses to install on an unknown executable. A game update
-may require a new RVA/signature before the plugin can be used safely.
+Targets Cyberpunk 2077 2.5. The hook target is located by byte
+signature instead of a fixed RVA, and the plugin refuses to install if the
+signature is missing or matches more than once. A game update that changes the
+function itself may still require a new signature.
+
+## Version 2.5.6
+
+- Fixed black side pillars returning in menus and the inventory on Cyberpunk
+  2077 2.5.
+- The plugin is no longer locked to a single game runtime, so RED4ext no longer
+  rejects it as "incompatible with the current patch".
+- Replaced the hard-coded 2.31 addresses of the fullscreen fit function and the
+  controller-pointer caller with signature scans.
+- CET scripts are unchanged from 2.5.5.
 
 ## Version 2.2.2
 
@@ -141,6 +160,16 @@ To use another SDK location:
 ```powershell
 .\native\build.ps1 -SdkPath D:\deps\RED4ext.SDK
 ```
+
+If the build fails with "vswhere.exe" not found, add the Visual Studio
+Installer folder to `PATH` for the current session first:
+
+```powershell
+$env:PATH = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer;$env:PATH"
+```
+
+If PowerShell blocks the script, run it with
+`powershell -ExecutionPolicy Bypass -File .\native\build.ps1`.
 
 The DLL is written to `native/build/BlackPillarsRemover.dll`.
 
